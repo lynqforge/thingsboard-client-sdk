@@ -114,7 +114,7 @@ const std::array<IAPI_Implementation*, 1U> apis = {
     &prov
 };
 // Initialize ThingsBoard instance with the maximum needed buffer size
-ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, DEFAULT_MAX_STACK_SIZE, apis);
+ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
 
 uint32_t previous_processing_time = 0U;
 
@@ -254,11 +254,6 @@ void provision_device(void *pvParameters) {
     // because the device has been provisioned and can reconnect with new credentials
     if (tb.connected()) {
         tb.disconnect();
-    }
-
-    // Wait for the provisioning device to disconnect
-    while (tb.connected()) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
     // Connect to the ThingsBoard server, as the provisioned client

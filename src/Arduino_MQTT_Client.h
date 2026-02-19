@@ -10,14 +10,8 @@
 #include <PubSubClient.h>
 
 
-/// @brief MQTT Client interface implementation that uses the PubSubClient forked by ThingsBoard (https://github.com/thingsboard/pubsubclient),
-/// under the hood to establish and communicate over a MQTT connection
-///
-/// @note The fork is recommended, because it includes multiple fixes and features:
-/// - Solve issues with using std::function callbacks for non ESP boards
-/// - Seperats the underlying Heap buffer previously used for both outgoing and incoming messages into two seperate buffers
-/// - Multiple other minor bufixes and features
-/// Since v0.15.0 only the ThingsBoard fork of the PubSubClient can be used, because splitting the Heap buffer into a input and output buffer resulted in breaking API changes
+/// @brief MQTT Client interface implementation that uses the PubSubClient forked from ThingsBoard (https://github.com/thingsboard/pubsubclient),
+/// under the hood to establish and communicate over a MQTT connection. The fork includes fixes to solve issues with using std::function callbacks for non ESP boards
 class Arduino_MQTT_Client : public IMQTT_Client {
   public:
     /// @brief Constructs a IMQTT_Client implementation without a network client, meaning it has to be added later with the set_client() method
@@ -61,11 +55,11 @@ class Arduino_MQTT_Client : public IMQTT_Client {
 
     bool connected() override;
 
-    MQTT_Connection_State get_connection_state() const override;
+    MQTT_Connection_State get_connection_state() override;
 
-    MQTT_Connection_Error get_last_connection_error() const override;
+    MQTT_Connection_Error get_last_connection_error() override;
 
-    void subscribe_connection_state_changed_callback(Callback<void, MQTT_Connection_State, MQTT_Connection_Error>::function callback) override;
+    void set_connection_state_changed_callback(Callback<void, MQTT_Connection_State, MQTT_Connection_Error>::function callback) override;
 
 #if THINGSBOARD_ENABLE_STREAM_UTILS
 

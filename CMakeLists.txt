@@ -11,7 +11,6 @@ set(srcs
     src/Provision_Callback.cpp
     src/RPC_Request_Callback.cpp
     src/Telemetry.cpp
-    src/Timeoutable_Request.cpp
 )
 
 set(dependencies
@@ -38,4 +37,4 @@ if(ESP_PLATFORM)
 	return()
 endif()
 
-project(ThingsBoardClientSDK VERSION 0.16.0)
+project(ThingsBoardClientSDK VERSION 0.15.0)

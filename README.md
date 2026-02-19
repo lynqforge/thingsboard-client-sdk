@@ -373,7 +373,7 @@ class Custom_API_Implementation : public IAPI_Implementation {
         return API_Process_Type::JSON;
     }
 
-    void Process_Response(char const * topic, uint8_t * payload, uint32_t length) override {
+    void Process_Response(char const * topic, uint8_t * payload, unsigned int length) override {
         // Nothing to do
     }
 
@@ -403,7 +403,7 @@ class Custom_API_Implementation : public IAPI_Implementation {
         // Nothing to do
     }
 
-    void Set_Client_Callbacks(Callback<void, IAPI_Implementation &>::function subscribe_api_callback, Callback<bool, char const * const, JsonDocument const &>::function send_json_callback, Callback<bool, char const * const, char const * const>::function send_json_string_callback, Callback<bool, char const * const>::function subscribe_topic_callback, Callback<bool, char const * const>::function unsubscribe_topic_callback, Callback<uint16_t>::function get_receive_size_callback, Callback<uint16_t>::function get_send_size_callback, Callback<bool, uint16_t, uint16_t>::function set_buffer_size_callback, Callback<size_t *>::function get_request_id_callback) override {
+    void Set_Client_Callbacks(Callback<void, IAPI_Implementation &>::function subscribe_api_callback, Callback<bool, char const * const, JsonDocument const &, size_t const &>::function send_json_callback, Callback<bool, char const * const, char const * const>::function send_json_string_callback, Callback<bool, char const * const>::function subscribe_topic_callback, Callback<bool, char const * const>::function unsubscribe_topic_callback, Callback<uint16_t>::function get_receive_size_callback, Callback<uint16_t>::function get_send_size_callback, Callback<bool, uint16_t, uint16_t>::function set_buffer_size_callback, Callback<size_t *>::function get_request_id_callback) override {
         // Nothing to do
     }
 };
@@ -587,11 +587,7 @@ class Custom_MQTT_Client : public IMQTT_Client {
         return true;
     }
 
-    uint16_t get_receive_buffer_size() override {
-        return 0U;
-    }
-
-    uint16_t get_send_buffer_size() override {
+    uint16_t get_buffer_size() override {
         return 0U;
     }
 
@@ -635,7 +631,7 @@ class Custom_MQTT_Client : public IMQTT_Client {
         return MQTT_Connection_Error::NONE;
     }
 
-    void subscribe_connection_state_changed_callback(Callback<void, MQTT_Connection_State, MQTT_Connection_Error>::function callback) override;
+    void set_connect_cycle_callback(Callback<void(MQTT_Connection_State, MQTT_Connection_Error)>::function callback) override {
         // Nothing to do
     }
 
@@ -714,7 +710,7 @@ Arduino_MQTT_Client mqttClient(espClient);
 // ThingsBoard tb(mqttClient);
 
 // The SDK setup with 128 bytes for JSON payload and 32 fields for JSON object
-ThingsBoardSized<32, DEFAULT_RESPONSE_AMOUNT, CustomLogger> tb(mqttClient, 128, 128);
+ThingsBoardSized<32, Default_Response_Amount, CustomLogger> tb(mqttClient, 128, 128);
 ```
 
 ## Have a question or proposal?
