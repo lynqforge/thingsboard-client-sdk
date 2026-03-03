@@ -147,65 +147,244 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
     }
 
     void Process_Response(char const * topic, uint8_t * payload, unsigned int length) override {
-        // Process raw callbacks FIRST - extract raw values before JSON parsing corrupts the payload
-        // ArduinoJson's deserializeJson modifies the payload buffer in-place (adds null terminators),
-        // which breaks subsequent strstr() searches
-        for (auto const & callback : m_raw_callbacks) {
-            char const * attr_key = callback.Get_Attribute_Key();
-            
-            if (Helper::stringIsNullorEmpty(attr_key)) {
-                continue;
-            }
-            
-            // Extract raw value substring from payload BEFORE any JSON parsing
-            char const * value_start = nullptr;
-            size_t value_length = 0;
-            
-            Extract_Failure_Reason failure_reason = Extract_Failure_Reason::NONE;
-            if (Extract_Attribute_Value((char *)payload, length, attr_key, &value_start, &value_length, &failure_reason)) {
-                // Call user callback with raw value string
-                callback.Call_Callback(attr_key, value_start, value_length);
-            }
 #if THINGSBOARD_ENABLE_DEBUG
-            else {
-                size_t const first_null = Find_First_Null_Byte(payload, length);
-                bool const has_null_in_range = first_null < length;
-                char message[256] = {};
-                (void)snprintf(
-                    message,
-                    sizeof(message),
-                    "[RAW_API] Extract failed key='%s' topic='%s' reason='%s' payload_len=%u null_at=%d",
-                    attr_key,
-                    (topic != nullptr) ? topic : "<null>",
-                    Get_Extract_Failure_Reason_String(failure_reason),
-                    length,
-                    has_null_in_range ? static_cast<int>(first_null) : -1
-                );
-                Logger::printfln(message);
-            }
-#endif // THINGSBOARD_ENABLE_DEBUG
-        }
+        Logger::printfln("[RAW_API] Process_Response called, %u raw callbacks registered", m_raw_callbacks.size());
+#endif
         
-        // NOW do the JSON parsing for the passthrough callback
-        // This modifies the payload buffer in-place, but we already extracted raw values above
-        static constexpr size_t OUTER_JSON_SIZE = 512U;
-        StaticJsonDocument<OUTER_JSON_SIZE> outer_doc;
-        DeserializationError error = deserializeJson(outer_doc, payload, length);
+        // Track which top-level keys were handled by raw callbacks
+        // Store actual matched keys (not prefix patterns) in fixed-size buffers
+        struct MatchedKey {
+            char key[64];
+        };
+#if THINGSBOARD_ENABLE_DYNAMIC
+        Vector<MatchedKey> matched_keys;
+#else
+        Array<MatchedKey, MaxSubscriptions> matched_keys;
+#endif
         
-        if (error) {
-            // Not valid JSON or too complex for outer parse - skip passthrough
+        // For prefix matching, we need to enumerate all attribute keys WITHOUT parsing their values
+        // Strategy: Lightweight scan for keys, then extract raw values only for matches
+        
+        // Make a working copy of the payload to avoid corruption during extraction
+        char * payload_copy = (char *)malloc(length + 1);
+        if (payload_copy == nullptr) {
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Failed to allocate payload copy");
+#endif
             return;
         }
+        memcpy(payload_copy, payload, length);
+        payload_copy[length] = '\0';
         
-        JsonObjectConst root = outer_doc.as<JsonObjectConst>();
+        // Track total number of top-level keys found (for optimization)
+        size_t total_keys_found = 0;
         
-        // Check for "shared" wrapper (attribute request responses wrap in "shared")
-        if (root.containsKey(SHARED_RESPONSE_KEY)) {
-            root = root[SHARED_RESPONSE_KEY];
+        // Scan for attribute keys in the payload
+        // Format: {"key1": value1, "key2": value2, ...} or {"shared":{"key1":value1,...}}
+        char * payload_end = payload_copy + length;
+        
+        // Check if wrapped in "shared" key (attribute request responses)
+        char * search_start = payload_copy;
+        char shared_key_pattern[32];
+        snprintf(shared_key_pattern, sizeof(shared_key_pattern), "\"%s\"", SHARED_RESPONSE_KEY);
+        const char * shared_wrapper = strstr(payload_copy, shared_key_pattern);
+        if (shared_wrapper != nullptr) {
+            // Find the opening brace of the shared object
+            char * shared_brace = strchr((char *)shared_wrapper, '{');
+            if (shared_brace != nullptr && shared_brace < payload_end) {
+                search_start = shared_brace;
+            }
         }
         
-        // Call passthrough callback with parsed JSON for simple attributes
-        m_json_passthrough_callback.Call_Callback(root);
+        // Character-by-character scan with depth tracking to detect only top-level keys.
+        // This avoids false positives from nested keys inside DEVICE_* JSON objects.
+        int object_depth = 0;
+        int array_depth = 0;
+        char * scan_ptr = search_start;
+        while (scan_ptr < payload_end) {
+            char current = *scan_ptr;
+
+            if (current == '"') {
+                // Parse full JSON string token with escape support.
+                char * quote_end = scan_ptr + 1;
+                bool escape_next = false;
+                while (quote_end < payload_end) {
+                    if (escape_next) {
+                        escape_next = false;
+                        quote_end++;
+                        continue;
+                    }
+                    if (*quote_end == '\\') {
+                        escape_next = true;
+                        quote_end++;
+                        continue;
+                    }
+                    if (*quote_end == '"') {
+                        break;
+                    }
+                    quote_end++;
+                }
+
+                if (quote_end >= payload_end) {
+                    break;
+                }
+
+                // Potential key only at top-level object (depth 1, not inside arrays).
+                if (object_depth == 1 && array_depth == 0) {
+                    char * after_quote = quote_end + 1;
+                    while (after_quote < payload_end && (*after_quote == ' ' || *after_quote == '\t' || *after_quote == '\n' || *after_quote == '\r')) {
+                        after_quote++;
+                    }
+
+                    if (after_quote < payload_end && *after_quote == ':') {
+                        size_t key_len = quote_end - scan_ptr - 1;
+                        if (key_len > 0 && key_len < 128) {
+                            char key_buffer[128];
+                            memcpy(key_buffer, scan_ptr + 1, key_len);
+                            key_buffer[key_len] = '\0';
+
+                            // Skip internal wrapper key.
+                            if (strcmp(key_buffer, SHARED_RESPONSE_KEY) != 0) {
+                                total_keys_found++;
+
+#if THINGSBOARD_ENABLE_DEBUG
+                                Logger::printfln("[RAW_API] Found top-level key: '%s'", key_buffer);
+#endif
+
+                                for (auto const & callback : m_raw_callbacks) {
+                                    if (callback.Matches(key_buffer)) {
+#if THINGSBOARD_ENABLE_DEBUG
+                                        Logger::printfln("[RAW_API] Callback MATCHED! Extracting raw value from original payload");
+#endif
+                                        char const * value_start = nullptr;
+                                        size_t value_length = 0;
+                                        Extract_Failure_Reason failure_reason = Extract_Failure_Reason::NONE;
+
+                                        if (Extract_Attribute_Value((char *)payload, length, key_buffer, &value_start, &value_length, &failure_reason)) {
+#if THINGSBOARD_ENABLE_DEBUG
+                                            Logger::printfln("[RAW_API] Extracted %u bytes, calling user callback", value_length);
+#endif
+                                            callback.Call_Callback(key_buffer, value_start, value_length);
+
+                                            MatchedKey mk;
+                                            strncpy(mk.key, key_buffer, sizeof(mk.key) - 1);
+                                            mk.key[sizeof(mk.key) - 1] = '\0';
+                                            matched_keys.push_back(mk);
+                                        }
+#if THINGSBOARD_ENABLE_DEBUG
+                                        else {
+                                            Logger::printfln("[RAW_API] Extract_Attribute_Value failed: %s", Get_Extract_Failure_Reason_String(failure_reason));
+                                        }
+#endif
+                                        break;
+                                    }
+                                }
+
+                                // Skip this key's full value to avoid scanning nested content as additional keys.
+                                char * value_start_scan = after_quote + 1;
+                                while (value_start_scan < payload_end && (*value_start_scan == ' ' || *value_start_scan == '\t' || *value_start_scan == '\n' || *value_start_scan == '\r')) {
+                                    value_start_scan++;
+                                }
+
+                                char * value_end_scan = Find_Value_End(value_start_scan, payload_end);
+                                if (value_end_scan != nullptr && value_end_scan > scan_ptr) {
+                                    scan_ptr = value_end_scan;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Skip this key's full value to avoid scanning nested content as additional keys.
+                        char * value_start_scan = after_quote + 1;
+                        while (value_start_scan < payload_end && (*value_start_scan == ' ' || *value_start_scan == '\t' || *value_start_scan == '\n' || *value_start_scan == '\r')) {
+                            value_start_scan++;
+                        }
+
+                        char * value_end_scan = Find_Value_End(value_start_scan, payload_end);
+                        if (value_end_scan != nullptr && value_end_scan > scan_ptr) {
+                            scan_ptr = value_end_scan;
+                            continue;
+                        }
+                    }
+                }
+
+                scan_ptr = quote_end + 1;
+                continue;
+            }
+
+            if (current == '{') {
+                object_depth++;
+            } else if (current == '}') {
+                object_depth--;
+                if (object_depth <= 0) {
+                    break;
+                }
+            } else if (current == '[') {
+                array_depth++;
+            } else if (current == ']') {
+                if (array_depth > 0) {
+                    array_depth--;
+                }
+            }
+
+            scan_ptr++;
+        }
+        
+        free(payload_copy);
+        
+        // Call passthrough callback with parsed JSON, excluding keys handled by raw callbacks
+        // OPTIMIZATION: Skip parsing if ALL top-level keys were matched by raw callbacks
+#if THINGSBOARD_ENABLE_DEBUG
+        Logger::printfln("[RAW_API] total_keys_found=%u, matched_keys.size()=%u", total_keys_found, matched_keys.size());
+#endif
+        
+        if (total_keys_found > 0 && matched_keys.size() >= total_keys_found) {
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] All %u keys matched by raw callbacks, skipping passthrough", total_keys_found);
+#endif
+            return;  // All keys handled, no need for passthrough
+        }
+        
+        {
+            StaticJsonDocument<1536> doc;
+            DeserializationError error = deserializeJson(doc, payload, length);
+            if (!error) {
+                JsonObjectConst root = doc.as<JsonObjectConst>();
+                if (root.containsKey(SHARED_RESPONSE_KEY)) {
+                    root = root[SHARED_RESPONSE_KEY];
+                }
+                
+                // Build filtered object with only non-matched keys
+                if (matched_keys.empty()) {
+                    // No raw matches - pass through all attributes
+                    m_json_passthrough_callback.Call_Callback(root);
+                } else {
+                    // Filter out matched keys
+                    StaticJsonDocument<1536> filtered_doc;
+                    JsonObject filtered = filtered_doc.to<JsonObject>();
+                    
+                    for (JsonPairConst kv : root) {
+                        bool is_matched = false;
+                        for (auto const & mk : matched_keys) {
+                            if (strcmp(kv.key().c_str(), mk.key) == 0) {
+                                is_matched = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!is_matched) {
+                            // This key was NOT handled by raw callback - include in passthrough
+                            filtered[kv.key()] = kv.value();
+                        }
+                    }
+                    
+                    // Only call passthrough if there are non-matched attributes
+                    if (!filtered.isNull() && filtered.size() > 0) {
+                        m_json_passthrough_callback.Call_Callback(filtered);
+                    }
+                }
+            }
+        }
     }
 
     void Process_Json_Response(char const * topic, JsonDocument const & data) override {
@@ -269,7 +448,16 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
 
         char const * attr_key = callback.Get_Attribute_Key();
         char request_payload[128];
-        (void)snprintf(request_payload, sizeof(request_payload), "{\"sharedKeys\":\"%s\"}", attr_key);
+        
+        if (callback.Is_Prefix()) {
+            // For prefix subscriptions, request all attributes (Option A)
+            // ThingsBoard API doesn't support prefix-based requests,
+            // so we request all and filter client-side using prefix matching
+            (void)snprintf(request_payload, sizeof(request_payload), "{}");
+        } else {
+            // For exact match subscriptions, request specific attribute
+            (void)snprintf(request_payload, sizeof(request_payload), "{\"sharedKeys\":\"%s\"}", attr_key);
+        }
 
         return m_send_json_string_callback.Call_Callback(request_topic, request_payload);
     }
