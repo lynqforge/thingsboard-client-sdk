@@ -9,7 +9,7 @@
 #include <string.h>
 
 
-uint8_t constexpr MAX_RAW_ATT_REQUEST_TOPIC_SIZE = 33U;
+uint8_t constexpr MAX_RAW_ATT_REQUEST_TOPIC_SIZE = 50U;  // v1/devices/me/attributes/response/999 = 42 chars + null
 // Log messages.
 #if !THINGSBOARD_ENABLE_DYNAMIC
 char constexpr RAW_SHARED_ATTRIBUTE_UPDATE_SUBSCRIPTIONS[] = "raw shared attribute update";
@@ -80,7 +80,13 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         
         // Subscribe to request response topic if auto-request is enabled
         if (request_on_subscribe) {
-            (void)m_subscribe_topic_callback.Call_Callback(ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Subscribing to response topic pattern: %s", ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#endif
+            bool subscribe_result = m_subscribe_topic_callback.Call_Callback(ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Response topic subscription %s", subscribe_result ? "succeeded" : "FAILED");
+#endif
         }
         
         m_raw_callbacks.insert(m_raw_callbacks.end(), first, last);
@@ -113,7 +119,13 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         
         // Subscribe to request response topic if auto-request is enabled
         if (request_on_subscribe) {
-            (void)m_subscribe_topic_callback.Call_Callback(ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Subscribing to response topic pattern: %s", ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#endif
+            bool subscribe_result = m_subscribe_topic_callback.Call_Callback(ATTRIBUTE_RESPONSE_SUBSCRIBE_TOPIC);
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Response topic subscription %s", subscribe_result ? "succeeded" : "FAILED");
+#endif
         }
         
         m_raw_callbacks.push_back(callback);
@@ -148,7 +160,7 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
 
     void Process_Response(char const * topic, uint8_t * payload, unsigned int length) override {
 #if THINGSBOARD_ENABLE_DEBUG
-        Logger::printfln("[RAW_API] Process_Response called, %u raw callbacks registered", m_raw_callbacks.size());
+        Logger::printfln("[RAW_API] Process_Response called on topic='%s', %u raw callbacks registered, m_response_topic='%s'", topic, m_raw_callbacks.size(), m_response_topic);
 #endif
         
         // Track which top-level keys were handled by raw callbacks
@@ -159,7 +171,10 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
 #if THINGSBOARD_ENABLE_DYNAMIC
         Vector<MatchedKey> matched_keys;
 #else
-        Array<MatchedKey, MaxSubscriptions> matched_keys;
+        // NOTE: Capacity is NOT tied to MaxSubscriptions (which is for callbacks).
+        // A single message can have many top-level keys. On server sync, the device receives
+        // ALL configured DEVICE_* attributes at once. Use capacity for ~20 devices + buffer.
+        Array<MatchedKey, 32> matched_keys;
 #endif
         
         // For prefix matching, we need to enumerate all attribute keys WITHOUT parsing their values
@@ -338,14 +353,22 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         Logger::printfln("[RAW_API] total_keys_found=%u, matched_keys.size()=%u", total_keys_found, matched_keys.size());
 #endif
         
-        if (total_keys_found > 0 && matched_keys.size() >= total_keys_found) {
-#if THINGSBOARD_ENABLE_DEBUG
-            Logger::printfln("[RAW_API] All %u keys matched by raw callbacks, skipping passthrough", total_keys_found);
-#endif
-            return;  // All keys handled, no need for passthrough
-        }
+        // Always deserialize and pass through ALL attributes to the passthrough callback.
+        // This handles both:
+        //  - DEVICE_* attributes (matched by prefix, will be processed by raw callbacks)
+        //  - Non-DEVICE_* attributes like OUTPUT1, fw_*, etc. (passed to JSON handlers via callback)
+        //
+        // By deserializing once here and returning, we PREVENT the dispatcher from attempting
+        // a second deserialization, which would corrupt the payload buffer with zero-copy null terminators.
+        //
+        // The passthrough callback forwards ALL attributes to downstream JSON handlers
+        // (Shared_Attribute_Update, OTA_Firmware_Update, etc.), which filter based on their
+        // own subscriptions. This is safe and memory-efficient.
         
-        {
+        if (total_keys_found > 0) {
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Found %u keys (matched=%u), deserializing and passing through", total_keys_found, matched_keys.size());
+#endif
             StaticJsonDocument<1536> doc;
             DeserializationError error = deserializeJson(doc, payload, length);
             if (!error) {
@@ -354,36 +377,12 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
                     root = root[SHARED_RESPONSE_KEY];
                 }
                 
-                // Build filtered object with only non-matched keys
-                if (matched_keys.empty()) {
-                    // No raw matches - pass through all attributes
-                    m_json_passthrough_callback.Call_Callback(root);
-                } else {
-                    // Filter out matched keys
-                    StaticJsonDocument<1536> filtered_doc;
-                    JsonObject filtered = filtered_doc.to<JsonObject>();
-                    
-                    for (JsonPairConst kv : root) {
-                        bool is_matched = false;
-                        for (auto const & mk : matched_keys) {
-                            if (strcmp(kv.key().c_str(), mk.key) == 0) {
-                                is_matched = true;
-                                break;
-                            }
-                        }
-                        
-                        if (!is_matched) {
-                            // This key was NOT handled by raw callback - include in passthrough
-                            filtered[kv.key()] = kv.value();
-                        }
-                    }
-                    
-                    // Only call passthrough if there are non-matched attributes
-                    if (!filtered.isNull() && filtered.size() > 0) {
-                        m_json_passthrough_callback.Call_Callback(filtered);
-                    }
-                }
+                // Pass ALL attributes to the passthrough callback.
+                // This includes both DEVICE_* (handled by raw callbacks) and non-DEVICE_* keys.
+                // The callback forwards to downstream JSON handlers which filter per their subscriptions.
+                m_json_passthrough_callback.Call_Callback(root);
             }
+            return;  // Prevent dispatcher from re-deserializing and corrupting the buffer
         }
     }
 
@@ -392,9 +391,16 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
     }
 
     bool Is_Response_Topic_Matching(char const * topic) const override {
-        // Match both update topic and request response topic
-        bool is_update = strncmp(ATTRIBUTE_TOPIC, topic, strlen(ATTRIBUTE_TOPIC)) == 0;
+        // Only claim attribute topic if we have raw callbacks registered.
+        // This allows normal SDK handlers (like OTA) to process attributes when RAW API isn't needed.
+        bool is_update = m_raw_callbacks.size() > 0 && strncmp(ATTRIBUTE_TOPIC, topic, strlen(ATTRIBUTE_TOPIC)) == 0;
         bool is_request_response = strncmp(m_response_topic, topic, strlen(m_response_topic)) == 0;
+#if THINGSBOARD_ENABLE_DEBUG
+        // Always log attribute-related topics to debug response matching
+        if (strstr(topic, "attributes") != nullptr) {
+            Logger::printfln("[RAW_API] Topic check: topic='%s', is_update=%u, is_request_response=%u, m_response_topic='%s'", topic, is_update, is_request_response, m_response_topic);
+        }
+#endif
         return is_update || is_request_response;
     }
 
@@ -434,6 +440,9 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         // Get request ID from client
         size_t * p_request_id = m_get_request_id_callback.Call_Callback();
         if (p_request_id == nullptr) {
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Request_Attribute: Failed to get request ID");
+#endif
             return false;
         }
         auto & request_id = *p_request_id;
@@ -454,12 +463,24 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
             // ThingsBoard API doesn't support prefix-based requests,
             // so we request all and filter client-side using prefix matching
             (void)snprintf(request_payload, sizeof(request_payload), "{}");
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Request_Attribute: Requesting prefix '%s', request_id=%u, response_topic=%s", attr_key, request_id, m_response_topic);
+#endif
         } else {
             // For exact match subscriptions, request specific attribute
             (void)snprintf(request_payload, sizeof(request_payload), "{\"sharedKeys\":\"%s\"}", attr_key);
+#if THINGSBOARD_ENABLE_DEBUG
+            Logger::printfln("[RAW_API] Request_Attribute: Requesting exact key '%s', request_id=%u, response_topic=%s", attr_key, request_id, m_response_topic);
+#endif
         }
 
-        return m_send_json_string_callback.Call_Callback(request_topic, request_payload);
+        bool result = m_send_json_string_callback.Call_Callback(request_topic, request_payload);
+#if THINGSBOARD_ENABLE_DEBUG
+        if (!result) {
+            Logger::printfln("[RAW_API] Request_Attribute: Failed to send request");
+        }
+#endif
+        return result;
     }
 
     /// @brief Extracts the raw value substring for a specific attribute key from the JSON payload

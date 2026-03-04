@@ -737,10 +737,12 @@ class ThingsBoardSized {
             api->Process_Response(topic, payload, length);
         }
 
-        // If the filtered api implementations was not emtpy it means the response was processed as its raw bytes representation atleast once,
-        // and because we interpreted it as raw bytes instead of json, we skip the further processing of those raw bytes as json.
-        // We do that because the received response is in that case not even valid json in the first place and would therefore simply fail deserialization
-        if (!filtered_raw_api_implementations.empty()) {
+        bool const processed_response_as_raw = !filtered_raw_api_implementations.empty();
+        bool const is_attribute_topic = strncmp(ATTRIBUTE_TOPIC, topic, strlen(ATTRIBUTE_TOPIC)) == 0;
+        // Raw handlers should not block JSON handlers for attribute topics, because OTA/shared-attribute
+        // callbacks are implemented as JSON APIs and still need to receive fw_* updates.
+        // For non-attribute topics (e.g., OTA binary chunks), keep the raw short-circuit behavior.
+        if (processed_response_as_raw && !is_attribute_topic) {
             return;
         }
 #else
@@ -753,7 +755,11 @@ class ThingsBoardSized {
             processed_response_as_raw = true;
         }
 
-        if (processed_response_as_raw) {
+        bool const is_attribute_topic = strncmp(ATTRIBUTE_TOPIC, topic, strlen(ATTRIBUTE_TOPIC)) == 0;
+        // Raw handlers should not block JSON handlers for attribute topics, because OTA/shared-attribute
+        // callbacks are implemented as JSON APIs and still need to receive fw_* updates.
+        // For non-attribute topics (e.g., OTA binary chunks), keep the raw short-circuit behavior.
+        if (processed_response_as_raw && !is_attribute_topic) {
             return;
         }
 #endif // THINGSBOARD_ENABLE_STL
