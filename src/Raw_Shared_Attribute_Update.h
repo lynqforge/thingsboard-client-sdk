@@ -180,32 +180,26 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         // For prefix matching, we need to enumerate all attribute keys WITHOUT parsing their values
         // Strategy: Lightweight scan for keys, then extract raw values only for matches
         
-        // Make a working copy of the payload to avoid corruption during extraction
-        char * payload_copy = (char *)malloc(length + 1);
-        if (payload_copy == nullptr) {
-#if THINGSBOARD_ENABLE_DEBUG
-            Logger::printfln("[RAW_API] Failed to allocate payload copy");
-#endif
-            return;
-        }
-        memcpy(payload_copy, payload, length);
-        payload_copy[length] = '\0';
+        // Scan payload in-place with bounded helpers to avoid per-message heap allocation.
+        // This reduces heap churn/fragmentation, especially in TLS mode.
+        char * payload_scan = reinterpret_cast<char *>(payload);
         
         // Track total number of top-level keys found (for optimization)
         size_t total_keys_found = 0;
         
         // Scan for attribute keys in the payload
         // Format: {"key1": value1, "key2": value2, ...} or {"shared":{"key1":value1,...}}
-        char * payload_end = payload_copy + length;
+        char * payload_end = payload_scan + length;
         
         // Check if wrapped in "shared" key (attribute request responses)
-        char * search_start = payload_copy;
+        char * search_start = payload_scan;
         char shared_key_pattern[32];
         snprintf(shared_key_pattern, sizeof(shared_key_pattern), "\"%s\"", SHARED_RESPONSE_KEY);
-        const char * shared_wrapper = strstr(payload_copy, shared_key_pattern);
+        size_t const shared_pattern_len = strlen(shared_key_pattern);
+        char * shared_wrapper = Find_Substring_Bounded(payload_scan, payload_end, shared_key_pattern, shared_pattern_len);
         if (shared_wrapper != nullptr) {
             // Find the opening brace of the shared object
-            char * shared_brace = strchr((char *)shared_wrapper, '{');
+            char * shared_brace = Find_Char_Bounded(shared_wrapper, payload_end, '{');
             if (shared_brace != nullptr && shared_brace < payload_end) {
                 search_start = shared_brace;
             }
@@ -344,8 +338,6 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
 
             scan_ptr++;
         }
-        
-        free(payload_copy);
         
         // Call passthrough callback with parsed JSON, excluding keys handled by raw callbacks
         // OPTIMIZATION: Skip parsing if ALL top-level keys were matched by raw callbacks
