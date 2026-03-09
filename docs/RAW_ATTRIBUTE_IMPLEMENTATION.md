@@ -34,15 +34,24 @@ Request payload behavior:
 - Prefix callback (`Is_Prefix() == true`): sends `{}` (request all shared attributes)
 - Exact callback: sends `{"sharedKeys":"<key>"}`
 
-## Why Single-Parse Passthrough Exists
+## Why Read-Only Deserialization Is Critical
 
-ArduinoJson zero-copy deserialization writes null terminators into the mutable payload buffer. If the same payload is deserialized a second time elsewhere, it can fail or produce invalid data.
+ArduinoJson zero-copy deserialization with mutable buffers writes null terminators into the payload, mutating the original MQTT message. If the same payload is deserialized again by downstream handlers, it can fail with `DeserializationError::InvalidInput` or produce corrupted data.
 
-Current mitigation:
+**Important fix implemented:** The RAW handler now uses read-only deserialization:
 
-- RAW handler performs one controlled `deserializeJson(...)`
-- Forwards parsed root object via passthrough callback
-- Returns from RAW processing path to avoid unsafe reparse patterns
+```cpp
+deserializeJson(doc, static_cast<uint8_t const *>(payload), length);
+```
+
+This forces ArduinoJson to copy string data instead of mutating the original buffer, which:
+
+- Prevents buffer corruption that breaks OTA firmware update JSON deserialization
+- Allows the central dispatcher to safely reuse the same MQTT payload for JSON API handlers
+- Enables RAW and JSON handlers to coexist on the same attribute topics without interference
+- Slightly increases RAM usage (string copies) but ensures data integrity
+
+**Previous issue:** Using mutable `deserializeJson(doc, payload, length)` caused OTA failures because the RAW handler would insert null terminators, then the OTA JSON handler would encounter corrupted bytes and fail with `InvalidInput`.
 
 ## Dispatcher Behavior
 
@@ -50,6 +59,7 @@ The dispatcher logic intentionally does **not** short-circuit JSON handlers for 
 
 - For non-attribute RAW topics (for example binary chunks): RAW can short-circuit.
 - For attribute topics: RAW + JSON coexist so OTA/shared callbacks still work.
+- The read-only deserialization in RAW handler ensures the payload remains intact for subsequent JSON handlers.
 
 ## Runtime Sizing Guidance
 
@@ -81,9 +91,10 @@ raw_shared_update.Raw_Attributes_Subscribe(raw_device_callback);  // auto-reques
 
 ## Known Tradeoffs
 
-- Passthrough currently forwards all keys, including keys already consumed by RAW callbacks.
-- If regular JSON handlers do heavy processing on large nested objects, increase `MaxResponse` and ensure handler-side filtering is strict by key/type.
-- Removing matched RAW keys before JSON forwarding is possible in principle, but requires careful payload/document handling to avoid extra memory pressure and zero-copy hazards.
+- **Memory overhead:** Read-only deserialization forces ArduinoJson to allocate copies of parsed strings instead of using zero-copy mode. This increases RAM usage slightly but is necessary for data integrity when multiple handlers process the same MQTT payload.
+- **Passthrough behavior:** Passthrough currently forwards all keys, including keys already consumed by RAW callbacks. This is by design to allow downstream JSON handlers (OTA, shared attributes) to filter what they need.
+- **Processing efficiency:** If regular JSON handlers do heavy processing on large nested objects, increase `MaxResponse` and ensure handler-side filtering is strict by key/type.
+- **Key filtering:** Removing matched RAW keys before JSON forwarding is technically possible but would require complex document manipulation and additional memory allocation, negating the benefits of the RAW API.
 
 ## Recommended Baseline (ESP32 Gateway)
 

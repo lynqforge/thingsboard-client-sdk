@@ -112,7 +112,9 @@ class Server_Side_RPC : public IAPI_Implementation {
     }
 
     void Process_Json_Response(char const * topic, JsonDocument const & data) override {
+#if THINGSBOARD_ENABLE_DEBUG
         Logger::printfln("[RPC_LIB] Process_Json_Response entry, topic=%s", topic);
+#endif // THINGSBOARD_ENABLE_DEBUG
         if (!data.containsKey(RPC_METHOD_KEY)) {
 #if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln(SERVER_RPC_METHOD_NULL);
@@ -120,7 +122,9 @@ class Server_Side_RPC : public IAPI_Implementation {
             return;
         }
         char const * method_name = data[RPC_METHOD_KEY];
+#if THINGSBOARD_ENABLE_DEBUG
         Logger::printfln("[RPC_LIB] RPC method name extracted: %s", method_name);
+#endif // THINGSBOARD_ENABLE_DEBUG
 
 #if THINGSBOARD_ENABLE_STL
         auto it = std::find_if(m_rpc_callbacks.begin(), m_rpc_callbacks.end(), [&method_name](RPC_Callback const & rpc) {
@@ -128,7 +132,9 @@ class Server_Side_RPC : public IAPI_Implementation {
             return (!Helper::stringIsNullorEmpty(subscribedMethodName) && strncmp(subscribedMethodName, method_name, strlen(subscribedMethodName)) == 0);
         });
         if (it != m_rpc_callbacks.end()) {
+#if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RPC_LIB] Found matching RPC callback");
+#endif // THINGSBOARD_ENABLE_DEBUG
             auto & rpc = *it;
 #else
         for (auto const & rpc : m_rpc_callbacks) {
@@ -136,7 +142,9 @@ class Server_Side_RPC : public IAPI_Implementation {
             if (Helper::stringIsNullorEmpty(subscribedMethodName) || strncmp(subscribedMethodName, method_name, strlen(subscribedMethodName)) != 0) {
               continue;
             }
+#if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RPC_LIB] Found matching RPC callback");
+#endif // THINGSBOARD_ENABLE_DEBUG
 #endif // THINGSBOARD_ENABLE_STL
 #if THINGSBOARD_ENABLE_DEBUG
             if (!data.containsKey(RPC_PARAMS_KEY)) {
@@ -151,14 +159,20 @@ class Server_Side_RPC : public IAPI_Implementation {
             JsonVariantConst const param = data[RPC_PARAMS_KEY];
 #if THINGSBOARD_ENABLE_DYNAMIC
             size_t const & rpc_response_size = rpc.Get_Response_Size();
+#if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RPC_LIB] Allocating dynamic JsonDocument size=%u for method %s", rpc_response_size, method_name);
+#endif // THINGSBOARD_ENABLE_DEBUG
             TBJsonDocument json_buffer(rpc_response_size);
 #else
             size_t constexpr rpc_response_size = MaxRPC;
+#if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RPC_LIB] Allocating static JsonDocument MaxRPC=%u for method %s", MaxRPC, method_name);
+#endif // THINGSBOARD_ENABLE_DEBUG
             StaticJsonDocument<JSON_OBJECT_SIZE(MaxRPC)> json_buffer;
 #endif // THINGSBOARD_ENABLE_DYNAMIC
+#if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RPC_LIB] Calling user RPC callback for method %s", method_name);
+#endif // THINGSBOARD_ENABLE_DEBUG
             rpc.Call_Callback(param, json_buffer);
 
             if (json_buffer.isNull()) {

@@ -40,6 +40,7 @@ The response is received on `v1/devices/me/attributes/response/+`.
 ```cpp
 void onRawDevice(char const * key, char const * value, size_t length) {
     DynamicJsonDocument doc(4096);
+    // The 'value' string is already extracted and safe to parse
     if (deserializeJson(doc, value, length)) {
         return;
     }
@@ -48,6 +49,8 @@ void onRawDevice(char const * key, char const * value, size_t length) {
 
 void onSharedSimple(JsonObjectConst const & data) {
     // handle OUTPUT1, fw_*, etc.
+    // This receives ALL attributes, including DEVICE_* keys
+    // Filter by key name if you need to avoid double-processing
 }
 
 Raw_Attribute_Callback device_cb(&onRawDevice, "DEVICE_", true);
@@ -55,11 +58,15 @@ raw_shared_update.Set_Json_Passthrough_Callback(&onSharedSimple);
 raw_shared_update.Raw_Attributes_Subscribe(device_cb);  // request_on_subscribe defaults to true
 ```
 
+**Important:** The RAW handler uses read-only deserialization internally to prevent MQTT buffer corruption. This ensures that JSON handlers (like OTA firmware updates) can safely deserialize the same payload after RAW callbacks complete.
+
 ## Operational Notes
 
-- Prefix matching removes the need to register one callback per device attribute key.
-- Large responses containing many `DEVICE_*` values require adequate MQTT RX buffer sizing.
-- If mixed payloads contain many top-level keys, increase `ThingsBoardSized<MaxResponse>` in static mode.
+- **Prefix matching:** Removes the need to register one callback per device attribute key.
+- **Buffer sizing:** Large responses containing many `DEVICE_*` values require adequate MQTT RX buffer sizing (recommend 16384+ bytes for gateway deployments).
+- **MaxResponse tuning:** If mixed payloads contain many top-level keys, increase `ThingsBoardSized<MaxResponse>` in static mode (recommend 16+ for gateways).
+- **Coexistence with OTA:** The RAW handler uses read-only deserialization (const payload pointer) to prevent buffer corruption. This allows OTA firmware updates and other JSON handlers to safely process the same MQTT message after RAW callbacks complete.
+- **Memory trade-off:** Read-only parsing increases RAM usage slightly (string copies vs zero-copy) but ensures data integrity when multiple handlers share the same MQTT payload.
 
 **CPU:** Slightly more than exact matching due to iteration:
 - Exact match: `O(n)` callbacks × `O(1)` strcmp = `O(n)`

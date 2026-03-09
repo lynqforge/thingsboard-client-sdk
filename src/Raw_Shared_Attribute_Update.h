@@ -350,19 +350,17 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
         //  - DEVICE_* attributes (matched by prefix, will be processed by raw callbacks)
         //  - Non-DEVICE_* attributes like OUTPUT1, fw_*, etc. (passed to JSON handlers via callback)
         //
-        // By deserializing once here and returning, we PREVENT the dispatcher from attempting
-        // a second deserialization, which would corrupt the payload buffer with zero-copy null terminators.
-        //
-        // The passthrough callback forwards ALL attributes to downstream JSON handlers
-        // (Shared_Attribute_Update, OTA_Firmware_Update, etc.), which filter based on their
-        // own subscriptions. This is safe and memory-efficient.
+        // IMPORTANT: Use read-only deserialization (const payload pointer) so we do NOT mutate
+        // the MQTT payload buffer. The central ThingsBoard dispatcher may still deserialize the
+        // same payload for JSON API handlers (e.g., OTA_Firmware_Update), and zero-copy parsing
+        // here would inject '\0' terminators and break that second parse with InvalidInput.
         
         if (total_keys_found > 0) {
 #if THINGSBOARD_ENABLE_DEBUG
             Logger::printfln("[RAW_API] Found %u keys (matched=%u), deserializing and passing through", total_keys_found, matched_keys.size());
 #endif
             StaticJsonDocument<1536> doc;
-            DeserializationError error = deserializeJson(doc, payload, length);
+            DeserializationError error = deserializeJson(doc, static_cast<uint8_t const *>(payload), length);
             if (!error) {
                 JsonObjectConst root = doc.as<JsonObjectConst>();
                 if (root.containsKey(SHARED_RESPONSE_KEY)) {
@@ -374,7 +372,7 @@ class Raw_Shared_Attribute_Update : public IAPI_Implementation {
                 // The callback forwards to downstream JSON handlers which filter per their subscriptions.
                 m_json_passthrough_callback.Call_Callback(root);
             }
-            return;  // Prevent dispatcher from re-deserializing and corrupting the buffer
+            return;  // RAW handler done; dispatcher may still run JSON handlers for attribute topics
         }
     }
 
